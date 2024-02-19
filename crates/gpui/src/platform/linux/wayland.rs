@@ -29,12 +29,16 @@ struct WaylandClientState {
     platform_inner: Rc<LinuxPlatformInner>,
     compositor: wl_compositor::WlCompositor,
     wm_base: xdg_wm_base::XdgWmBase,
-    windows: Vec<Rc<WaylandWindowInner>>,
+    windows: SlotMap<WaylandWindowId, Rc<WaylandWindowInner>>,
     seats: SlotMap<WaylandSeatId, WaylandSeatState>,
     mouse_location: Option<Point<Pixels>>,
     button_pressed: Option<MouseButton>,
-    mouse_focused_window: Option<Rc<WaylandWindowInner>>,
-    keyboard_focused_window: Option<Rc<WaylandWindowInner>>,
+    mouse_focused_window: Option<WaylandWindowId>,
+    keyboard_focused_window: Option<WaylandWindowId>,
+}
+
+slotmap::new_key_type! {
+    struct WaylandWindowId;
 }
 
 #[derive(Clone)]

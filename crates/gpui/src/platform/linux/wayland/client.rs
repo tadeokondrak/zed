@@ -1,3 +1,4 @@
+use super::WaylandWindowId;
 use crate::platform::linux::wayland::{
     WaylandClient, WaylandClientState, WaylandWindow, WaylandWindowInner,
 };
@@ -40,7 +41,7 @@ impl WaylandClient {
             platform_inner: Rc::clone(&linux_platform_inner),
             compositor: globals.bind(&qh, 1..=1, ()).unwrap(),
             wm_base: globals.bind(&qh, 1..=1, ()).unwrap(),
-            windows: Vec::new(),
+            windows: SlotMap::with_key(),
             seats,
             mouse_location: None,
             button_pressed: None,
@@ -81,21 +82,30 @@ impl WaylandClient {
     ) -> Box<dyn PlatformWindow> {
         let mut state = self.state.lock();
 
-        let wl_surface = state.compositor.create_surface(&self.qh, ());
-        let xdg_surface = state.wm_base.get_xdg_surface(&wl_surface, &self.qh, ());
-        let toplevel = xdg_surface.get_toplevel(&self.qh, ());
+        let mut inner = None;
+        let wl_compositor = state.compositor.clone();
+        let xdg_wm_base = state.wm_base.clone();
+        let qh = self.qh.clone();
 
-        wl_surface.commit();
+        let windows = &mut state.windows;
+        windows.insert_with_key(|key| {
+            let wl_surface = wl_compositor.create_surface(&qh, key);
+            let xdg_surface = xdg_wm_base.get_xdg_surface(&wl_surface, &qh, key);
+            let toplevel = xdg_surface.get_toplevel(&qh, key);
+            wl_surface.commit();
+            let window = Rc::new(WaylandWindowInner::new(
+                wl_surface.clone(),
+                xdg_surface,
+                toplevel,
+                options,
+            ));
+            inner = Some(Rc::clone(&window));
+            window
+        });
 
-        let window = Rc::new(WaylandWindowInner::new(
-            wl_surface.clone(),
-            xdg_surface,
-            toplevel,
-            options,
-        ));
-
-        state.windows.push(Rc::clone(&window));
-        Box::new(WaylandWindow { inner: window })
+        Box::new(WaylandWindow {
+            inner: inner.unwrap(),
+        })
     }
 }
 
@@ -127,74 +137,86 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
 }
 
 delegate_noop!(WaylandClientState: ignore wl_compositor::WlCompositor);
-delegate_noop!(WaylandClientState: ignore wl_surface::WlSurface);
 delegate_noop!(WaylandClientState: ignore wl_shm::WlShm);
 delegate_noop!(WaylandClientState: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(WaylandClientState: ignore wl_buffer::WlBuffer);
 
-impl Dispatch<WlCallback, WlSurface> for WaylandClientState {
+impl Dispatch<WlSurface, WaylandWindowId> for WaylandClientState {
+    fn event(
+        state: &mut Self,
+        proxy: &WlSurface,
+        event: <WlSurface as Proxy>::Event,
+        data: &WaylandWindowId,
+        conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_surface::Event::Enter { output: _ } => {}
+            wl_surface::Event::Leave { output: _ } => {}
+            wl_surface::Event::PreferredBufferScale { factor: _ } => {}
+            wl_surface::Event::PreferredBufferTransform { transform: _ } => {}
+            _ => todo!(),
+        }
+    }
+}
+
+impl Dispatch<WlCallback, WaylandWindowId> for WaylandClientState {
     fn event(
         state: &mut Self,
         _: &WlCallback,
         event: wl_callback::Event,
-        surf: &WlSurface,
+        &window_id: &WaylandWindowId,
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
         match event {
             wl_callback::Event::Done { callback_data: _ } => {
-                for window in &state.windows {
-                    if window.surface.id() == surf.id() {
-                        window.surface.frame(qh, window.surface.clone());
-                        window.update();
-                        window.surface.commit();
-                    }
-                }
+                let window = &state.windows[window_id];
+                window.surface.frame(qh, window_id);
+                window.update();
+                window.surface.commit();
             }
             _ => (),
         }
     }
 }
 
-impl Dispatch<xdg_surface::XdgSurface, ()> for WaylandClientState {
+impl Dispatch<xdg_surface::XdgSurface, WaylandWindowId> for WaylandClientState {
     fn event(
         state: &mut Self,
         xdg_surface: &xdg_surface::XdgSurface,
         event: xdg_surface::Event,
-        _: &(),
+        &window_id: &WaylandWindowId,
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
         match event {
             xdg_surface::Event::Configure { serial } => {
                 xdg_surface.ack_configure(serial);
-                for window in &state.windows {
-                    if &window.xdg_surface == xdg_surface {
-                        let mut state = window.state.lock();
-                        let frame_callback_already_requested = state.frame_callback_requested;
-                        state.frame_callback_requested = true;
-                        drop(state);
+                let window = &state.windows[window_id];
+                let mut state = window.state.lock();
+                let frame_callback_already_requested = state.frame_callback_requested;
+                state.frame_callback_requested = true;
+                drop(state);
 
-                        if !frame_callback_already_requested {
-                            window.surface.frame(qh, window.surface.clone());
-                        }
-                        window.update();
-                        window.surface.commit();
-                        return;
-                    }
+                if !frame_callback_already_requested {
+                    window.surface.frame(qh, window_id);
                 }
+                window.update();
+                window.surface.commit();
+                return;
             }
             _ => todo!(),
         }
     }
 }
 
-impl Dispatch<xdg_toplevel::XdgToplevel, ()> for WaylandClientState {
+impl Dispatch<xdg_toplevel::XdgToplevel, WaylandWindowId> for WaylandClientState {
     fn event(
         state: &mut Self,
         xdg_toplevel: &xdg_toplevel::XdgToplevel,
         event: <xdg_toplevel::XdgToplevel as Proxy>::Event,
-        _: &(),
+        &window_id: &WaylandWindowId,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -205,24 +227,13 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for WaylandClientState {
                 states,
             } => {
                 if width == 0 || height == 0 {
-                    width = 1000;
-                    height = 1000;
+                    (width, height) = (1280, 720);
                 }
-                for window in &state.windows {
-                    if window.toplevel.id() == xdg_toplevel.id() {
-                        window.resize(width, height);
-                        return;
-                    }
-                }
+                state.windows[window_id].resize(width, height);
             }
             xdg_toplevel::Event::Close => {
                 xdg_toplevel.destroy();
-                let index = state
-                    .windows
-                    .iter()
-                    .position(|window| window.toplevel.id() == xdg_toplevel.id())
-                    .unwrap();
-                state.windows.swap_remove(index);
+                state.windows.remove(window_id);
                 state.platform_inner.state.lock().quit_requested |= state.windows.is_empty();
             }
             xdg_toplevel::Event::ConfigureBounds {
