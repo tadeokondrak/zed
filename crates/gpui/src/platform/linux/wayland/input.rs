@@ -23,16 +23,18 @@ impl Dispatch<wl_seat::WlSeat, WaylandSeatId> for WaylandClientState {
         conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_seat::Event::Capabilities {
-            capabilities: WEnum::Value(capabilities),
-        } = event
-        {
-            if capabilities.contains(wl_seat::Capability::Keyboard) {
-                seat.get_keyboard(qh, seat_id);
+        match event {
+            wl_seat::Event::Capabilities { capabilities } => {
+                let capabilities = capabilities.into_result().unwrap();
+                if capabilities.contains(wl_seat::Capability::Keyboard) {
+                    seat.get_keyboard(qh, seat_id);
+                }
+                if capabilities.contains(wl_seat::Capability::Pointer) {
+                    seat.get_pointer(qh, seat_id);
+                }
             }
-            if capabilities.contains(wl_seat::Capability::Pointer) {
-                seat.get_pointer(qh, seat_id);
-            }
+            wl_seat::Event::Name { name } => {}
+            _ => {}
         }
     }
 }

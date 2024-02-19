@@ -25,12 +25,23 @@ impl WaylandClient {
         let conn = Connection::connect_to_env().unwrap();
         let (globals, mut event_queue) = registry_queue_init::<WaylandClientState>(&conn).unwrap();
         let qh = event_queue.handle();
+        let mut seats = SlotMap::with_key();
+        globals.contents().with_list(|list| {
+            for global in list {
+                if global.interface == "wl_seat" {
+                    let seat_id = seats.insert(super::WaylandSeatState::default());
+                    globals
+                        .registry()
+                        .bind::<wl_seat::WlSeat, _, _>(global.name, 1, &qh, seat_id);
+                }
+            }
+        });
         let state = Arc::new(Mutex::new(WaylandClientState {
             platform_inner: Rc::clone(&linux_platform_inner),
             compositor: globals.bind(&qh, 1..=1, ()).unwrap(),
             wm_base: globals.bind(&qh, 1..=1, ()).unwrap(),
             windows: Vec::new(),
-            seats: SlotMap::with_key(),
+            seats,
             mouse_location: None,
             button_pressed: None,
             mouse_focused_window: None,
@@ -74,7 +85,6 @@ impl WaylandClient {
         let xdg_surface = state.wm_base.get_xdg_surface(&wl_surface, &self.qh, ());
         let toplevel = xdg_surface.get_toplevel(&self.qh, ());
 
-        wl_surface.frame(&self.qh, wl_surface.clone());
         wl_surface.commit();
 
         let window = Rc::new(WaylandWindowInner::new(
@@ -98,17 +108,20 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global {
-            name, interface, ..
-        } = event
-        {
-            match interface.as_str() {
+        match event {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version: _,
+            } => match interface.as_str() {
                 "wl_seat" => {
                     let seat_id = state.seats.insert(super::WaylandSeatState::default());
-                    let seat = registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qh, seat_id);
+                    registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qh, seat_id);
                 }
                 _ => {}
-            };
+            },
+            wl_registry::Event::GlobalRemove { name: _ } => {}
+            _ => {}
         }
     }
 }
@@ -128,14 +141,17 @@ impl Dispatch<WlCallback, WlSurface> for WaylandClientState {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_callback::Event::Done { .. } = event {
-            for window in &state.windows {
-                if window.surface.id() == surf.id() {
-                    window.surface.frame(qh, surf.clone());
-                    window.update();
-                    window.surface.commit();
+        match event {
+            wl_callback::Event::Done { callback_data: _ } => {
+                for window in &state.windows {
+                    if window.surface.id() == surf.id() {
+                        window.surface.frame(qh, window.surface.clone());
+                        window.update();
+                        window.surface.commit();
+                    }
                 }
             }
+            _ => (),
         }
     }
 }
@@ -147,17 +163,28 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for WaylandClientState {
         event: xdg_surface::Event,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
-        if let xdg_surface::Event::Configure { serial, .. } = event {
-            xdg_surface.ack_configure(serial);
-            for window in &state.windows {
-                if &window.xdg_surface == xdg_surface {
-                    window.update();
-                    window.surface.commit();
-                    return;
+        match event {
+            xdg_surface::Event::Configure { serial } => {
+                xdg_surface.ack_configure(serial);
+                for window in &state.windows {
+                    if &window.xdg_surface == xdg_surface {
+                        let mut state = window.state.lock();
+                        let frame_callback_already_requested = state.frame_callback_requested;
+                        state.frame_callback_requested = true;
+                        drop(state);
+
+                        if !frame_callback_already_requested {
+                            window.surface.frame(qh, window.surface.clone());
+                        }
+                        window.update();
+                        window.surface.commit();
+                        return;
+                    }
                 }
             }
+            _ => todo!(),
         }
     }
 }
@@ -171,32 +198,39 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for WaylandClientState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let xdg_toplevel::Event::Configure {
-            width,
-            height,
-            states: _,
-        } = event
-        {
-            if width == 0 || height == 0 {
-                return;
-            }
-            for window in &state.windows {
-                if window.toplevel.id() == xdg_toplevel.id() {
-                    window.resize(width, height);
-                    window.surface.commit();
-                    return;
+        match event {
+            xdg_toplevel::Event::Configure {
+                mut width,
+                mut height,
+                states,
+            } => {
+                if width == 0 || height == 0 {
+                    width = 1000;
+                    height = 1000;
+                }
+                for window in &state.windows {
+                    if window.toplevel.id() == xdg_toplevel.id() {
+                        window.resize(width, height);
+                        return;
+                    }
                 }
             }
-        } else if let xdg_toplevel::Event::Close = event {
-            state.windows.retain(|window| {
-                if window.toplevel.id() == xdg_toplevel.id() {
-                    window.toplevel.destroy();
-                    false
-                } else {
-                    true
-                }
-            });
-            state.platform_inner.state.lock().quit_requested |= state.windows.is_empty();
+            xdg_toplevel::Event::Close => {
+                xdg_toplevel.destroy();
+                let index = state
+                    .windows
+                    .iter()
+                    .position(|window| window.toplevel.id() == xdg_toplevel.id())
+                    .unwrap();
+                state.windows.swap_remove(index);
+                state.platform_inner.state.lock().quit_requested |= state.windows.is_empty();
+            }
+            xdg_toplevel::Event::ConfigureBounds {
+                width: _,
+                height: _,
+            } => {}
+            xdg_toplevel::Event::WmCapabilities { capabilities: _ } => {}
+            _ => {}
         }
     }
 }

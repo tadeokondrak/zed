@@ -80,6 +80,7 @@ impl WaylandWindowState {
             renderer: BladeRenderer::new(gpu, extent),
             bounds,
             input_handler: None,
+            frame_callback_requested: false,
         }
     }
 }
@@ -127,14 +128,13 @@ impl WaylandWindowInner {
     }
 
     pub fn resize(&self, width: i32, height: i32) {
-        {
-            let mut inner = self.state.lock();
-            inner.bounds.size.width = width;
-            inner.bounds.size.height = height;
-            inner
-                .renderer
-                .update_drawable_size(size(width as f64, height as f64));
-        }
+        let mut inner = self.state.lock();
+        inner.bounds.size.width = width;
+        inner.bounds.size.height = height;
+        inner
+            .renderer
+            .update_drawable_size(size(width as f64, height as f64));
+        drop(inner);
         let mut callbacks = self.callbacks.lock();
         if let Some(ref mut fun) = callbacks.resize {
             fun(
@@ -159,6 +159,7 @@ impl WaylandWindowInner {
     }
 
     pub fn handle_input(&self, input: PlatformInput) {
+        eprintln!("{input:?}");
         if let Some(ref mut fun) = self.callbacks.lock().input {
             if fun(input.clone()) {
                 return;

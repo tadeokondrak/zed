@@ -54,6 +54,7 @@ struct WaylandWindowState {
     renderer: BladeRenderer,
     bounds: Bounds<i32>,
     input_handler: Option<PlatformInputHandler>,
+    frame_callback_requested: bool,
 }
 
 slotmap::new_key_type! {
