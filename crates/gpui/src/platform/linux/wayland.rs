@@ -5,9 +5,10 @@ use crate::{
     PlatformInputHandler, Point, Size,
 };
 use parking_lot::Mutex;
-use std::{ffi::c_void, rc::Rc, sync::Arc};
+use slotmap::SlotMap;
+use std::{rc::Rc, sync::Arc};
 use wayland_client::{
-    protocol::{wl_buffer, wl_compositor, wl_surface},
+    protocol::{wl_compositor, wl_surface},
     QueueHandle,
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -29,8 +30,7 @@ struct WaylandClientState {
     compositor: wl_compositor::WlCompositor,
     wm_base: xdg_wm_base::XdgWmBase,
     windows: Vec<Rc<WaylandWindowInner>>,
-    modifiers: Modifiers,
-    scroll_direction: f64,
+    seats: SlotMap<WaylandSeatId, WaylandSeatState>,
     mouse_location: Option<Point<Pixels>>,
     button_pressed: Option<MouseButton>,
     mouse_focused_window: Option<Rc<WaylandWindowInner>>,
@@ -54,6 +54,17 @@ struct WaylandWindowState {
     renderer: BladeRenderer,
     bounds: Bounds<i32>,
     input_handler: Option<PlatformInputHandler>,
+}
+
+slotmap::new_key_type! {
+    struct WaylandSeatId;
+}
+
+#[derive(Default)]
+struct WaylandSeatState {
+    xkb_state: Option<xkb::State>,
+    modifiers: Modifiers,
+    scroll_direction: f64,
 }
 
 #[derive(Default)]

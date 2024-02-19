@@ -18,7 +18,6 @@ use super::WaylandWindow;
 use super::WaylandWindowInner;
 use super::WaylandWindowState;
 use crate::platform::blade::BladeRenderer;
-use crate::platform::linux::wayland::RawWindow;
 use crate::platform::linux::wayland::WaylandDisplay;
 use crate::platform::{PlatformAtlas, PlatformInputHandler, PlatformWindow};
 use crate::scene::Scene;

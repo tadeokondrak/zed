@@ -1,4 +1,4 @@
-use crate::platform::linux::wayland::WaylandClientState;
+use crate::platform::linux::wayland::{WaylandClientState, WaylandSeatId};
 use crate::{
     KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, PlatformInput, Point, ScrollDelta, ScrollWheelEvent, TouchPhase,
@@ -14,13 +14,12 @@ use wayland_client::{
 };
 use xkbcommon::xkb::{self, ffi::XKB_KEYMAP_FORMAT_TEXT_V1, KEYMAP_COMPILE_NO_FLAGS};
 
-
-impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientState {
+impl Dispatch<wl_seat::WlSeat, WaylandSeatId> for WaylandClientState {
     fn event(
         state: &mut Self,
         seat: &wl_seat::WlSeat,
         event: wl_seat::Event,
-        data: &(),
+        &seat_id: &WaylandSeatId,
         conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
@@ -29,24 +28,25 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientState {
         } = event
         {
             if capabilities.contains(wl_seat::Capability::Keyboard) {
-                seat.get_keyboard(qh, ());
+                seat.get_keyboard(qh, seat_id);
             }
             if capabilities.contains(wl_seat::Capability::Pointer) {
-                seat.get_pointer(qh, ());
+                seat.get_pointer(qh, seat_id);
             }
         }
     }
 }
 
-impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientState {
+impl Dispatch<wl_keyboard::WlKeyboard, WaylandSeatId> for WaylandClientState {
     fn event(
         state: &mut Self,
         keyboard: &wl_keyboard::WlKeyboard,
         event: wl_keyboard::Event,
-        data: &(),
+        &seat_id: &WaylandSeatId,
         conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
+        let seat_state = &mut state.seats[seat_id];
         match event {
             wl_keyboard::Event::Keymap {
                 format: WEnum::Value(format),
@@ -70,7 +70,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientState {
                     .unwrap()
                 }
                 .unwrap();
-                state.keymap_state = Some(xkb::State::new(&keymap));
+                seat_state.xkb_state = Some(xkb::State::new(&keymap));
             }
             wl_keyboard::Event::Enter { surface, .. } => {
                 for window in &state.windows {
@@ -86,15 +86,15 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientState {
                 group,
                 ..
             } => {
-                let keymap_state = state.keymap_state.as_mut().unwrap();
+                let keymap_state = seat_state.xkb_state.as_mut().unwrap();
                 keymap_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
-                state.modifiers.shift =
+                seat_state.modifiers.shift =
                     keymap_state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE);
-                state.modifiers.alt =
+                seat_state.modifiers.alt =
                     keymap_state.mod_name_is_active(xkb::MOD_NAME_ALT, xkb::STATE_MODS_EFFECTIVE);
-                state.modifiers.control =
+                seat_state.modifiers.control =
                     keymap_state.mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE);
-                state.modifiers.command =
+                seat_state.modifiers.command =
                     keymap_state.mod_name_is_active(xkb::MOD_NAME_LOGO, xkb::STATE_MODS_EFFECTIVE);
             }
             wl_keyboard::Event::Key {
@@ -104,7 +104,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientState {
             } => {
                 const MIN_KEYCODE: u32 = 8; // used to convert evdev scancode to xkb scancode
 
-                let keymap_state = state.keymap_state.as_ref().unwrap();
+                let keymap_state = seat_state.xkb_state.as_ref().unwrap();
                 let keycode = xkb::Keycode::from(key + MIN_KEYCODE);
                 let key_utf32 = keymap_state.key_get_utf32(keycode);
                 let key_utf8 = keymap_state.key_get_utf8(keycode);
@@ -122,7 +122,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientState {
                         wl_keyboard::KeyState::Pressed => {
                             focused_window.handle_input(PlatformInput::KeyDown(KeyDownEvent {
                                 keystroke: Keystroke {
-                                    modifiers: state.modifiers,
+                                    modifiers: seat_state.modifiers,
                                     key,
                                     ime_key,
                                 },
@@ -132,7 +132,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientState {
                         wl_keyboard::KeyState::Released => {
                             focused_window.handle_input(PlatformInput::KeyUp(KeyUpEvent {
                                 keystroke: Keystroke {
-                                    modifiers: state.modifiers,
+                                    modifiers: seat_state.modifiers,
                                     key,
                                     ime_key,
                                 },
@@ -157,15 +157,16 @@ fn linux_button_to_gpui(button: u32) -> MouseButton {
     }
 }
 
-impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientState {
+impl Dispatch<wl_pointer::WlPointer, WaylandSeatId> for WaylandClientState {
     fn event(
         state: &mut Self,
         wl_pointer: &wl_pointer::WlPointer,
         event: wl_pointer::Event,
-        data: &(),
+        &seat_id: &WaylandSeatId,
         conn: &Connection,
         qh: &QueueHandle<Self>,
     ) {
+        let seat_state = &mut state.seats[seat_id];
         match event {
             wl_pointer::Event::Enter {
                 surface,
@@ -198,7 +199,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientState {
                     focused_window.handle_input(PlatformInput::MouseMove(MouseMoveEvent {
                         position: state.mouse_location.unwrap(),
                         pressed_button: state.button_pressed,
-                        modifiers: state.modifiers,
+                        modifiers: seat_state.modifiers,
                     }))
                 }
             }
@@ -218,7 +219,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientState {
                             focused_window.handle_input(PlatformInput::MouseDown(MouseDownEvent {
                                 button: linux_button_to_gpui(button),
                                 position: *mouse_location,
-                                modifiers: state.modifiers,
+                                modifiers: seat_state.modifiers,
                                 click_count: 1,
                             }));
                         }
@@ -239,7 +240,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientState {
                 direction: WEnum::Value(direction),
                 ..
             } => {
-                state.scroll_direction = match direction {
+                seat_state.scroll_direction = match direction {
                     AxisRelativeDirection::Identical => -1.0,
                     AxisRelativeDirection::Inverted => 1.0,
                     _ => -1.0,
@@ -256,7 +257,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientState {
                 if let (Some(focused_window), Some(mouse_location)) =
                     (focused_window, mouse_location)
                 {
-                    let value = value * state.scroll_direction;
+                    let value = value * seat_state.scroll_direction;
                     focused_window.handle_input(PlatformInput::ScrollWheel(ScrollWheelEvent {
                         position: *mouse_location,
                         delta: match axis {
@@ -268,7 +269,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientState {
                             }
                             _ => unimplemented!(),
                         },
-                        modifiers: state.modifiers,
+                        modifiers: seat_state.modifiers,
                         touch_phase: TouchPhase::Started,
                     }))
                 }

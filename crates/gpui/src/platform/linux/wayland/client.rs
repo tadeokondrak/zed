@@ -2,9 +2,10 @@ use crate::platform::linux::wayland::{
     WaylandClient, WaylandClientState, WaylandWindow, WaylandWindowInner,
 };
 use crate::platform::{LinuxPlatformInner, PlatformWindow};
-use crate::{AnyWindowHandle, DisplayId, Modifiers, PlatformDisplay, WindowOptions};
+use crate::{AnyWindowHandle, DisplayId, PlatformDisplay, WindowOptions};
 use calloop_wayland_source::WaylandSource;
 use parking_lot::Mutex;
+use slotmap::SlotMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
@@ -29,8 +30,7 @@ impl WaylandClient {
             compositor: globals.bind(&qh, 1..=1, ()).unwrap(),
             wm_base: globals.bind(&qh, 1..=1, ()).unwrap(),
             windows: Vec::new(),
-            modifiers: Modifiers::default(),
-            scroll_direction: -1.0,
+            seats: SlotMap::with_key(),
             mouse_location: None,
             button_pressed: None,
             mouse_focused_window: None,
@@ -104,7 +104,8 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
         {
             match interface.as_str() {
                 "wl_seat" => {
-                    let seat = registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qh, ());
+                    let seat_id = state.seats.insert(super::WaylandSeatState::default());
+                    let seat = registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qh, seat_id);
                 }
                 _ => {}
             };
