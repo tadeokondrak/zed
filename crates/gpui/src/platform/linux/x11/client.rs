@@ -13,6 +13,7 @@ use crate::platform::{
 use crate::{
     AnyWindowHandle, Bounds, DisplayId, PlatformDisplay, PlatformInput, Point, Size, WindowOptions,
 };
+use calloop::channel::Sender;
 
 pub(crate) struct X11ClientState {
     pub(crate) windows: HashMap<x::Window, Rc<X11WindowState>>,
@@ -24,11 +25,27 @@ pub(crate) struct X11Client {
     xcb_connection: Arc<xcb::Connection>,
     x_root_index: i32,
     atoms: XcbAtoms,
-    state: Mutex<X11ClientState>,
+    state: Arc<Mutex<X11ClientState>>,
+}
+
+fn xcb_thread(connection: Arc<xcb::Connection>, channel: Sender<xcb::Event>) {
+    loop {
+        match connection.wait_for_event() {
+            Ok(event) => match channel.send(event) {
+                Ok(()) => {}
+                Err(e) => {
+                    panic!("{e}");
+                }
+            },
+            Err(e) => {
+                panic!("{e}");
+            }
+        }
+    }
 }
 
 impl X11Client {
-    pub(crate) fn new(inner: Rc<LinuxPlatformInner>) -> Self {
+    pub(crate) fn new(inner: Rc<LinuxPlatformInner>) -> Rc<Self> {
         let (xcb_connection, x_root_index) = xcb::Connection::connect_with_extensions(
             None,
             &[xcb::Extension::Present, xcb::Extension::Xkb],
@@ -57,16 +74,38 @@ impl X11Client {
         let xkb_state =
             xkb::x11::state_new_from_device(&xkb_keymap, &xcb_connection, xkb_device_id);
 
-        Self {
-            platform_inner: inner,
-            xcb_connection,
+        let state = Arc::new(Mutex::new(X11ClientState {
+            windows: HashMap::default(),
+            xkb: xkb_state,
+        }));
+
+        let client = Rc::new(Self {
+            xcb_connection: Arc::clone(&xcb_connection),
             x_root_index,
             atoms,
-            state: Mutex::new(X11ClientState {
-                windows: HashMap::default(),
-                xkb: xkb_state,
-            }),
+            platform_inner: Rc::clone(&inner),
+            state: Arc::clone(&state),
+        });
+
+        let (event_sender, event_receiver) = calloop::channel::channel::<xcb::Event>();
+        {
+            let client = Rc::clone(&client);
+            inner
+                .loop_handle
+                .insert_source(event_receiver, move |event, _, _| match event {
+                    calloop::channel::Event::Msg(event) => {
+                        client.handle_event(event);
+                    }
+                    calloop::channel::Event::Closed => {}
+                })
+                .unwrap();
         }
+
+        std::thread::spawn(move || {
+            xcb_thread(xcb_connection, event_sender);
+        });
+
+        client
     }
 
     fn get_window(&self, win: x::Window) -> Rc<X11WindowState> {
@@ -206,25 +245,6 @@ impl X11Client {
 }
 
 impl Client for X11Client {
-    //    fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
-    //        on_finish_launching();
-    //        //Note: here and below, don't keep the lock() open when calling
-    //        // into window functions as they may invoke callbacks that need
-    //        // to immediately access the platform (self).
-    //        while !self.platform_inner.state.lock().quit_requested {
-    //            let event = self.xcb_connection.wait_for_event().unwrap();
-    //            self.handle_event(event);
-    //
-    //            if let Ok(runnable) = self.platform_inner.main_receiver.try_recv() {
-    //                runnable.run();
-    //            }
-    //        }
-    //
-    //        if let Some(ref mut fun) = self.platform_inner.callbacks.lock().quit {
-    //            fun();
-    //        }
-    //    }
-
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
         let setup = self.xcb_connection.get_setup();
         setup

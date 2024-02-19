@@ -6,14 +6,13 @@
 
 use crate::{PlatformDispatcher, TaskLabel};
 use async_task::Runnable;
+use calloop::channel::Sender;
 use parking::{Parker, Unparker};
 use parking_lot::Mutex;
 use std::{
-    panic,
-    thread,
+    panic, thread,
     time::{Duration, Instant},
 };
-use calloop::channel::Sender;
 
 pub(crate) struct LinuxDispatcher {
     parker: Mutex<Parker>,
@@ -25,9 +24,7 @@ pub(crate) struct LinuxDispatcher {
 }
 
 impl LinuxDispatcher {
-    pub fn new(
-        main_sender: Sender<Runnable>,
-    ) -> Self {
+    pub fn new(main_sender: Sender<Runnable>) -> Self {
         let (background_sender, background_receiver) = flume::unbounded::<Runnable>();
         let background_thread = thread::spawn(move || {
             for runnable in background_receiver {

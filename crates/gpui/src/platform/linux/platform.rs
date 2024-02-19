@@ -52,7 +52,7 @@ pub(crate) struct LinuxPlatformInner {
 
 enum LinuxClient {
     Wayland(WaylandClient),
-    X11(X11Client),
+    X11(Rc<X11Client>),
 }
 
 pub(crate) struct LinuxPlatform {
