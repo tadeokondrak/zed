@@ -1,11 +1,6 @@
-use std::fmt::Debug;
-
 use uuid::Uuid;
-
 use crate::{Bounds, DisplayId, GlobalPixels, PlatformDisplay, Size};
-
-#[derive(Debug)]
-pub(crate) struct WaylandDisplay {}
+use crate::platform::linux::wayland::WaylandDisplay;
 
 impl PlatformDisplay for WaylandDisplay {
     // todo!(linux)

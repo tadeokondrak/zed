@@ -13,33 +13,20 @@ use raw_window_handle::{
 use wayland_client::{protocol::wl_surface, Proxy};
 use wayland_protocols::xdg::shell::client::xdg_toplevel;
 
+use super::Callbacks;
+use super::WaylandWindow;
+use super::WaylandWindowInner;
+use super::WaylandWindowState;
 use crate::platform::blade::BladeRenderer;
-use crate::platform::linux::wayland::display::WaylandDisplay;
+use crate::platform::linux::wayland::RawWindow;
+use crate::platform::linux::wayland::WaylandDisplay;
 use crate::platform::{PlatformAtlas, PlatformInputHandler, PlatformWindow};
 use crate::scene::Scene;
 use crate::{
     px, size, Bounds, Modifiers, Pixels, PlatformDisplay, PlatformInput, Point, PromptLevel, Size,
     WindowAppearance, WindowBounds, WindowOptions,
 };
-
-#[derive(Default)]
-pub(crate) struct Callbacks {
-    request_frame: Option<Box<dyn FnMut()>>,
-    input: Option<Box<dyn FnMut(crate::PlatformInput) -> bool>>,
-    active_status_change: Option<Box<dyn FnMut(bool)>>,
-    resize: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
-    fullscreen: Option<Box<dyn FnMut(bool)>>,
-    moved: Option<Box<dyn FnMut()>>,
-    should_close: Option<Box<dyn FnMut() -> bool>>,
-    close: Option<Box<dyn FnOnce()>>,
-    appearance_changed: Option<Box<dyn FnMut()>>,
-}
-
-struct WaylandWindowInner {
-    renderer: BladeRenderer,
-    bounds: Bounds<i32>,
-    input_handler: Option<PlatformInputHandler>,
-}
+use wayland_protocols::xdg::shell::client::xdg_surface;
 
 struct RawWindow {
     window: *mut c_void,
@@ -62,8 +49,8 @@ unsafe impl HasRawDisplayHandle for RawWindow {
     }
 }
 
-impl WaylandWindowInner {
-    fn new(wl_surf: &Arc<wl_surface::WlSurface>, bounds: Bounds<i32>) -> Self {
+impl WaylandWindowState {
+    fn new(wl_surf: wl_surface::WlSurface, bounds: Bounds<i32>) -> Self {
         let raw = RawWindow {
             window: wl_surf.id().as_ptr().cast::<c_void>(),
             display: wl_surf
@@ -98,17 +85,11 @@ impl WaylandWindowInner {
     }
 }
 
-pub(crate) struct WaylandWindowState {
-    inner: Mutex<WaylandWindowInner>,
-    pub(crate) callbacks: Mutex<Callbacks>,
-    pub(crate) surface: Arc<wl_surface::WlSurface>,
-    pub(crate) toplevel: Arc<xdg_toplevel::XdgToplevel>,
-}
-
-impl WaylandWindowState {
-    pub(crate) fn new(
-        wl_surf: Arc<wl_surface::WlSurface>,
-        toplevel: Arc<xdg_toplevel::XdgToplevel>,
+impl WaylandWindowInner {
+    pub fn new(
+        wl_surf: wl_surface::WlSurface,
+        xdg_surface: xdg_surface::XdgSurface,
+        toplevel: xdg_toplevel::XdgToplevel,
         options: WindowOptions,
     ) -> Self {
         if options.bounds == WindowBounds::Maximized {
@@ -129,8 +110,9 @@ impl WaylandWindowState {
         };
 
         Self {
-            surface: Arc::clone(&wl_surf),
-            inner: Mutex::new(WaylandWindowInner::new(&wl_surf, bounds)),
+            surface: wl_surf.clone(),
+            xdg_surface,
+            state: Mutex::new(WaylandWindowState::new(wl_surf, bounds)),
             callbacks: Mutex::new(Callbacks::default()),
             toplevel,
         }
@@ -147,7 +129,7 @@ impl WaylandWindowState {
 
     pub fn resize(&self, width: i32, height: i32) {
         {
-            let mut inner = self.inner.lock();
+            let mut inner = self.state.lock();
             inner.bounds.size.width = width;
             inner.bounds.size.height = height;
             inner
@@ -184,7 +166,7 @@ impl WaylandWindowState {
             }
         }
         if let PlatformInput::KeyDown(event) = input {
-            let mut inner = self.inner.lock();
+            let mut inner = self.state.lock();
             if let Some(ref mut input_handler) = inner.input_handler {
                 if let Some(ime_key) = &event.keystroke.ime_key {
                     input_handler.replace_text_in_range(None, ime_key);
@@ -193,9 +175,6 @@ impl WaylandWindowState {
         }
     }
 }
-
-#[derive(Clone)]
-pub(crate) struct WaylandWindow(pub(crate) Rc<WaylandWindowState>);
 
 impl HasWindowHandle for WaylandWindow {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
@@ -217,7 +196,7 @@ impl PlatformWindow for WaylandWindow {
 
     // todo!(linux)
     fn content_size(&self) -> Size<Pixels> {
-        let inner = self.0.inner.lock();
+        let inner = self.inner.state.lock();
         Size {
             width: Pixels(inner.bounds.size.width as f32),
             height: Pixels(inner.bounds.size.height as f32),
@@ -260,12 +239,12 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
-        self.0.inner.lock().input_handler = Some(input_handler);
+        self.inner.state.lock().input_handler = Some(input_handler);
     }
 
     //todo!(linux)
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
-        self.0.inner.lock().input_handler.take()
+        self.inner.state.lock().input_handler.take()
     }
 
     //todo!(linux)
@@ -284,7 +263,7 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn set_title(&mut self, title: &str) {
-        self.0.toplevel.set_title(title.to_string());
+        self.inner.toplevel.set_title(title.to_string());
     }
 
     fn set_edited(&mut self, edited: bool) {
@@ -308,11 +287,11 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut()>) {
-        self.0.callbacks.lock().request_frame = Some(callback);
+        self.inner.callbacks.lock().request_frame = Some(callback);
     }
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> bool>) {
-        self.0.callbacks.lock().input = Some(callback);
+        self.inner.callbacks.lock().input = Some(callback);
     }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
@@ -320,7 +299,7 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn on_resize(&self, callback: Box<dyn FnMut(Size<Pixels>, f32)>) {
-        self.0.callbacks.lock().resize = Some(callback);
+        self.inner.callbacks.lock().resize = Some(callback);
     }
 
     fn on_fullscreen(&self, callback: Box<dyn FnMut(bool)>) {
@@ -328,15 +307,15 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn on_moved(&self, callback: Box<dyn FnMut()>) {
-        self.0.callbacks.lock().moved = Some(callback);
+        self.inner.callbacks.lock().moved = Some(callback);
     }
 
     fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
-        self.0.callbacks.lock().should_close = Some(callback);
+        self.inner.callbacks.lock().should_close = Some(callback);
     }
 
     fn on_close(&self, callback: Box<dyn FnOnce()>) {
-        self.0.callbacks.lock().close = Some(callback);
+        self.inner.callbacks.lock().close = Some(callback);
     }
 
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
@@ -349,12 +328,12 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn draw(&self, scene: &Scene) {
-        let mut inner = self.0.inner.lock();
+        let mut inner = self.inner.state.lock();
         inner.renderer.draw(scene);
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        let inner = self.0.inner.lock();
+        let inner = self.inner.state.lock();
         inner.renderer.sprite_atlas().clone()
     }
 

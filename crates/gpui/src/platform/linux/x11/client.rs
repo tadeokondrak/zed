@@ -6,7 +6,6 @@ use xkbcommon::xkb;
 
 use collections::HashMap;
 
-use crate::platform::linux::client::Client;
 use crate::platform::{
     LinuxPlatformInner, PlatformWindow, X11Display, X11Window, X11WindowState, XcbAtoms,
 };
@@ -242,10 +241,8 @@ impl X11Client {
             _ => {}
         }
     }
-}
 
-impl Client for X11Client {
-    fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
+    pub fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
         let setup = self.xcb_connection.get_setup();
         setup
             .roots()
@@ -256,11 +253,12 @@ impl Client for X11Client {
             })
             .collect()
     }
-    fn display(&self, id: DisplayId) -> Option<Rc<dyn PlatformDisplay>> {
+
+    pub fn display(&self, id: DisplayId) -> Option<Rc<dyn PlatformDisplay>> {
         Some(Rc::new(X11Display::new(&self.xcb_connection, id.0 as i32)))
     }
 
-    fn open_window(
+    pub fn open_window(
         &self,
         _handle: AnyWindowHandle,
         options: WindowOptions,

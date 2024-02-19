@@ -10,13 +10,12 @@ use std::{
 
 use ashpd::desktop::file_chooser::{OpenFileRequest, SaveFileRequest};
 use async_task::Runnable;
-use calloop::{EventLoop, LoopHandle};
+use calloop::{EventLoop, LoopHandle, LoopSignal};
 use futures::channel::oneshot;
 use parking_lot::Mutex;
 use time::UtcOffset;
 use wayland_client::Connection;
 
-use crate::platform::linux::client::Client;
 use crate::platform::linux::wayland::WaylandClient;
 use crate::platform::{X11Client, XcbAtoms};
 use crate::{
@@ -43,6 +42,7 @@ pub(crate) struct Callbacks {
 pub(crate) struct LinuxPlatformInner {
     pub(crate) event_loop: Mutex<EventLoop<'static, ()>>,
     pub(crate) loop_handle: LoopHandle<'static, ()>,
+    pub(crate) loop_signal: LoopSignal,
     pub(crate) background_executor: BackgroundExecutor,
     pub(crate) foreground_executor: ForegroundExecutor,
     pub(crate) text_system: Arc<LinuxTextSystem>,
@@ -85,7 +85,7 @@ impl LinuxPlatform {
         let event_loop = EventLoop::try_new().unwrap();
         event_loop
             .handle()
-            .insert_source(main_receiver, |event, &mut (), &mut ()| match event {
+            .insert_source(main_receiver, |event, _, _| match event {
                 calloop::channel::Event::Msg(runnable) => {
                     runnable.run();
                 }
@@ -95,6 +95,7 @@ impl LinuxPlatform {
         let dispatcher = Arc::new(LinuxDispatcher::new(main_sender));
         let inner = Rc::new(LinuxPlatformInner {
             loop_handle: event_loop.handle(),
+            loop_signal: event_loop.get_signal(),
             event_loop: Mutex::new(event_loop),
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
             foreground_executor: ForegroundExecutor::new(dispatcher.clone()),
@@ -133,11 +134,18 @@ impl Platform for LinuxPlatform {
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
         on_finish_launching();
         let mut event_loop = self.inner.event_loop.lock();
-        event_loop.run(Duration::MAX, &mut (), |_| {}).unwrap();
+        let signal = event_loop.get_signal();
+        event_loop
+            .run(Duration::MAX, &mut (), |data| {
+                if self.inner.state.lock().quit_requested {
+                    signal.stop();
+                }
+            })
+            .unwrap();
     }
 
     fn quit(&self) {
-        self.inner.state.lock().quit_requested = true;
+        self.inner.loop_signal.stop();
     }
 
     //todo!(linux)
