@@ -1,5 +1,4 @@
 mod client;
-mod client_dispatcher;
 mod dispatcher;
 mod platform;
 mod text_system;

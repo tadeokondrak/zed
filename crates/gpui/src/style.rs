@@ -210,7 +210,7 @@ impl Default for TextStyle {
             color: black(),
             // todo!(linux) make this configurable or choose better default
             font_family: if cfg!(target_os = "linux") {
-                "FreeMono".into()
+                "Fira Mono".into()
             } else {
                 "Helvetica".into()
             },

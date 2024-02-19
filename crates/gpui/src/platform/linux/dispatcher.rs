@@ -4,23 +4,21 @@
 //todo!(linux): remove
 #![allow(unused_variables)]
 
-use crate::platform::linux::client_dispatcher::ClientDispatcher;
 use crate::{PlatformDispatcher, TaskLabel};
 use async_task::Runnable;
 use parking::{Parker, Unparker};
 use parking_lot::Mutex;
 use std::{
     panic,
-    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
+use calloop::channel::Sender;
 
 pub(crate) struct LinuxDispatcher {
-    client_dispatcher: Arc<dyn ClientDispatcher + Send + Sync>,
     parker: Mutex<Parker>,
     timed_tasks: Mutex<Vec<(Instant, Runnable)>>,
-    main_sender: flume::Sender<Runnable>,
+    main_sender: Sender<Runnable>,
     background_sender: flume::Sender<Runnable>,
     _background_thread: thread::JoinHandle<()>,
     main_thread_id: thread::ThreadId,
@@ -28,8 +26,7 @@ pub(crate) struct LinuxDispatcher {
 
 impl LinuxDispatcher {
     pub fn new(
-        main_sender: flume::Sender<Runnable>,
-        client_dispatcher: &Arc<dyn ClientDispatcher + Send + Sync>,
+        main_sender: Sender<Runnable>,
     ) -> Self {
         let (background_sender, background_receiver) = flume::unbounded::<Runnable>();
         let background_thread = thread::spawn(move || {
@@ -38,7 +35,6 @@ impl LinuxDispatcher {
             }
         });
         Self {
-            client_dispatcher: Arc::clone(client_dispatcher),
             parker: Mutex::new(Parker::new()),
             timed_tasks: Mutex::new(Vec::new()),
             main_sender,
@@ -60,7 +56,6 @@ impl PlatformDispatcher for LinuxDispatcher {
 
     fn dispatch_on_main_thread(&self, runnable: Runnable) {
         self.main_sender.send(runnable).unwrap();
-        self.client_dispatcher.dispatch_on_main_thread();
     }
 
     fn dispatch_after(&self, duration: Duration, runnable: Runnable) {

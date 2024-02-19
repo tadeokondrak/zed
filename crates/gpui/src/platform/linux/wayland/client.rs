@@ -28,6 +28,7 @@ use crate::{
     KeyUpEvent, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, PlatformDisplay, PlatformInput, Point, ScrollWheelEvent, TouchPhase, WindowOptions,
 };
+use calloop_wayland_source::WaylandSource;
 
 const MIN_KEYCODE: u32 = 8; // used to convert evdev scancode to xkb scancode
 
@@ -49,15 +50,14 @@ pub(crate) struct WaylandClientState {
 
 pub(crate) struct WaylandClient {
     platform_inner: Rc<LinuxPlatformInner>,
-    conn: Arc<Connection>,
-    state: Mutex<WaylandClientState>,
-    event_queue: Mutex<EventQueue<WaylandClientState>>,
-    qh: Arc<QueueHandle<WaylandClientState>>,
+    state: Arc<Mutex<WaylandClientState>>,
+    qh: QueueHandle<WaylandClientState>,
 }
 
 impl WaylandClient {
-    pub(crate) fn new(linux_platform_inner: Rc<LinuxPlatformInner>, conn: Arc<Connection>) -> Self {
-        let state = WaylandClientState {
+    pub(crate) fn new(linux_platform_inner: Rc<LinuxPlatformInner>) -> Self {
+        let conn = Connection::connect_to_env().unwrap();
+        let mut state = WaylandClientState {
             compositor: None,
             buffer: None,
             wm_base: None,
@@ -78,40 +78,30 @@ impl WaylandClient {
             mouse_focused_window: None,
             keyboard_focused_window: None,
         };
-        let event_queue: EventQueue<WaylandClientState> = conn.new_event_queue();
+        let mut event_queue: EventQueue<WaylandClientState> = conn.new_event_queue();
         let qh = event_queue.handle();
+        let _registry = conn.display().get_registry(&qh, ());
+        event_queue.roundtrip(&mut state).unwrap();
+        let state = Arc::new(Mutex::new(state));
+        let source = WaylandSource::new(conn, event_queue);
+        {
+            let state = Arc::clone(&state);
+            linux_platform_inner
+                .loop_handle
+                .insert_source(source, move |_, queue, _| {
+                    queue.dispatch_pending(&mut *state.lock())
+                })
+                .unwrap();
+        }
         Self {
-            platform_inner: linux_platform_inner,
-            conn,
-            state: Mutex::new(state),
-            event_queue: Mutex::new(event_queue),
-            qh: Arc::new(qh),
+            platform_inner: Rc::clone(&linux_platform_inner),
+            state,
+            qh,
         }
     }
 }
 
 impl Client for WaylandClient {
-    fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
-        let display = self.conn.display();
-        let mut eq = self.event_queue.lock();
-        let _registry = display.get_registry(&self.qh, ());
-
-        eq.roundtrip(&mut self.state.lock()).unwrap();
-
-        on_finish_launching();
-        while !self.platform_inner.state.lock().quit_requested {
-            eq.flush().unwrap();
-            eq.dispatch_pending(&mut self.state.lock()).unwrap();
-            if let Some(guard) = self.conn.prepare_read() {
-                guard.read().unwrap();
-                eq.dispatch_pending(&mut self.state.lock()).unwrap();
-            }
-            if let Ok(runnable) = self.platform_inner.main_receiver.try_recv() {
-                runnable.run();
-            }
-        }
-    }
-
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
         Vec::new()
     }
@@ -138,7 +128,6 @@ impl Client for WaylandClient {
         wl_surface.commit();
 
         let window_state = Rc::new(WaylandWindowState::new(
-            &self.conn,
             wl_surface.clone(),
             Arc::new(toplevel),
             options,

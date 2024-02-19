@@ -10,22 +10,22 @@ use std::{
 
 use ashpd::desktop::file_chooser::{OpenFileRequest, SaveFileRequest};
 use async_task::Runnable;
-use flume::{Receiver, Sender};
+use calloop::{EventLoop, LoopHandle};
 use futures::channel::oneshot;
 use parking_lot::Mutex;
 use time::UtcOffset;
 use wayland_client::Connection;
 
 use crate::platform::linux::client::Client;
-use crate::platform::linux::client_dispatcher::ClientDispatcher;
-use crate::platform::linux::wayland::{WaylandClient, WaylandClientDispatcher};
-use crate::platform::{X11Client, X11ClientDispatcher, XcbAtoms};
+use crate::platform::linux::wayland::WaylandClient;
+use crate::platform::{X11Client, XcbAtoms};
 use crate::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayId,
     ForegroundExecutor, Keymap, LinuxDispatcher, LinuxTextSystem, Menu, PathPromptOptions,
     Platform, PlatformDisplay, PlatformInput, PlatformTextSystem, PlatformWindow, Result,
     SemanticVersion, Task, WindowOptions,
 };
+use calloop::channel::{Channel, Sender};
 
 #[derive(Default)]
 pub(crate) struct Callbacks {
@@ -41,16 +41,22 @@ pub(crate) struct Callbacks {
 }
 
 pub(crate) struct LinuxPlatformInner {
+    pub(crate) event_loop: Mutex<EventLoop<'static, ()>>,
+    pub(crate) loop_handle: LoopHandle<'static, ()>,
     pub(crate) background_executor: BackgroundExecutor,
     pub(crate) foreground_executor: ForegroundExecutor,
-    pub(crate) main_receiver: flume::Receiver<Runnable>,
     pub(crate) text_system: Arc<LinuxTextSystem>,
     pub(crate) callbacks: Mutex<Callbacks>,
     pub(crate) state: Mutex<LinuxPlatformState>,
 }
 
+enum LinuxClient {
+    Wayland(WaylandClient),
+    X11(X11Client),
+}
+
 pub(crate) struct LinuxPlatform {
-    client: Rc<dyn Client>,
+    client: LinuxClient,
     inner: Rc<LinuxPlatformInner>,
 }
 
@@ -69,90 +75,44 @@ impl LinuxPlatform {
         let wayland_display = env::var_os("WAYLAND_DISPLAY");
         let use_wayland = wayland_display.is_some() && !wayland_display.unwrap().is_empty();
 
-        let (main_sender, main_receiver) = flume::unbounded::<Runnable>();
+        let (main_sender, main_receiver) = calloop::channel::channel::<Runnable>();
         let text_system = Arc::new(LinuxTextSystem::new());
         let callbacks = Mutex::new(Callbacks::default());
         let state = Mutex::new(LinuxPlatformState {
             quit_requested: false,
         });
 
+        let event_loop = EventLoop::try_new().unwrap();
+        event_loop
+            .handle()
+            .insert_source(main_receiver, |event, &mut (), &mut ()| match event {
+                calloop::channel::Event::Msg(runnable) => {
+                    runnable.run();
+                }
+                calloop::channel::Event::Closed => {}
+            });
+
+        let dispatcher = Arc::new(LinuxDispatcher::new(main_sender));
+        let inner = Rc::new(LinuxPlatformInner {
+            loop_handle: event_loop.handle(),
+            event_loop: Mutex::new(event_loop),
+            background_executor: BackgroundExecutor::new(dispatcher.clone()),
+            foreground_executor: ForegroundExecutor::new(dispatcher.clone()),
+            text_system,
+            callbacks,
+            state,
+        });
+
         if use_wayland {
-            Self::new_wayland(main_sender, main_receiver, text_system, callbacks, state)
+            Self {
+                client: LinuxClient::Wayland(WaylandClient::new(Rc::clone(&inner))),
+                inner,
+            }
         } else {
-            Self::new_x11(main_sender, main_receiver, text_system, callbacks, state)
-        }
-    }
-
-    fn new_wayland(
-        main_sender: Sender<Runnable>,
-        main_receiver: Receiver<Runnable>,
-        text_system: Arc<LinuxTextSystem>,
-        callbacks: Mutex<Callbacks>,
-        state: Mutex<LinuxPlatformState>,
-    ) -> Self {
-        let conn = Arc::new(Connection::connect_to_env().unwrap());
-        let client_dispatcher: Arc<dyn ClientDispatcher + Send + Sync> =
-            Arc::new(WaylandClientDispatcher::new(&conn));
-        let dispatcher = Arc::new(LinuxDispatcher::new(main_sender, &client_dispatcher));
-        let inner = Rc::new(LinuxPlatformInner {
-            background_executor: BackgroundExecutor::new(dispatcher.clone()),
-            foreground_executor: ForegroundExecutor::new(dispatcher.clone()),
-            main_receiver,
-            text_system,
-            callbacks,
-            state,
-        });
-        let client = Rc::new(WaylandClient::new(Rc::clone(&inner), Arc::clone(&conn)));
-        Self {
-            client,
-            inner: Rc::clone(&inner),
-        }
-    }
-
-    fn new_x11(
-        main_sender: Sender<Runnable>,
-        main_receiver: Receiver<Runnable>,
-        text_system: Arc<LinuxTextSystem>,
-        callbacks: Mutex<Callbacks>,
-        state: Mutex<LinuxPlatformState>,
-    ) -> Self {
-        let (xcb_connection, x_root_index) = xcb::Connection::connect_with_extensions(
-            None,
-            &[xcb::Extension::Present, xcb::Extension::Xkb],
-            &[],
-        )
-        .unwrap();
-
-        let xkb_ver = xcb_connection
-            .wait_for_reply(xcb_connection.send_request(&xcb::xkb::UseExtension {
-                wanted_major: xcb::xkb::MAJOR_VERSION as u16,
-                wanted_minor: xcb::xkb::MINOR_VERSION as u16,
-            }))
-            .unwrap();
-        assert!(xkb_ver.supported());
-
-        let atoms = XcbAtoms::intern_all(&xcb_connection).unwrap();
-        let xcb_connection = Arc::new(xcb_connection);
-        let client_dispatcher: Arc<dyn ClientDispatcher + Send + Sync> =
-            Arc::new(X11ClientDispatcher::new(&xcb_connection, x_root_index));
-        let dispatcher = Arc::new(LinuxDispatcher::new(main_sender, &client_dispatcher));
-        let inner = Rc::new(LinuxPlatformInner {
-            background_executor: BackgroundExecutor::new(dispatcher.clone()),
-            foreground_executor: ForegroundExecutor::new(dispatcher.clone()),
-            main_receiver,
-            text_system,
-            callbacks,
-            state,
-        });
-        let client = Rc::new(X11Client::new(
-            Rc::clone(&inner),
-            xcb_connection,
-            x_root_index,
-            atoms,
-        ));
-        Self {
-            client,
-            inner: Rc::clone(&inner),
+            Self {
+                client: LinuxClient::X11(X11Client::new(Rc::clone(&inner))),
+                inner,
+            }
         }
     }
 }
@@ -171,7 +131,9 @@ impl Platform for LinuxPlatform {
     }
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
-        self.client.run(on_finish_launching)
+        on_finish_launching();
+        let mut event_loop = self.inner.event_loop.lock();
+        event_loop.run(Duration::MAX, &mut (), |_| {}).unwrap();
     }
 
     fn quit(&self) {
@@ -194,11 +156,17 @@ impl Platform for LinuxPlatform {
     fn unhide_other_apps(&self) {}
 
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
-        self.client.displays()
+        match &self.client {
+            LinuxClient::Wayland(client) => client.displays(),
+            LinuxClient::X11(client) => client.displays(),
+        }
     }
 
     fn display(&self, id: DisplayId) -> Option<Rc<dyn PlatformDisplay>> {
-        self.client.display(id)
+        match &self.client {
+            LinuxClient::Wayland(client) => client.display(id),
+            LinuxClient::X11(client) => client.display(id),
+        }
     }
 
     //todo!(linux)
@@ -211,7 +179,10 @@ impl Platform for LinuxPlatform {
         handle: AnyWindowHandle,
         options: WindowOptions,
     ) -> Box<dyn PlatformWindow> {
-        self.client.open_window(handle, options)
+        match &self.client {
+            LinuxClient::Wayland(client) => client.open_window(handle, options),
+            LinuxClient::X11(client) => client.open_window(handle, options),
+        }
     }
 
     fn open_url(&self, url: &str) {
